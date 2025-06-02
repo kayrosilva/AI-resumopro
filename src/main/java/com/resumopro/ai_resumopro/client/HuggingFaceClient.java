@@ -6,6 +6,12 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.client.HttpServerErrorException;
+import org.springframework.web.client.ResourceAccessException;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 
 @Component
 public class HuggingFaceClient {
@@ -13,21 +19,26 @@ public class HuggingFaceClient {
     @Value("${huggingface.api.token}")
     private String huggingfaceToken;
 
-    private final RestTemplate restTemplate = new RestTemplate();
+    private final RestTemplate restTemplate;
 
-    // Método para resumir texto com modelo dinâmico
+    public HuggingFaceClient() {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(5000);  // 5 segundos para abrir conexão
+        factory.setReadTimeout(30000);    // 30 segundos para aguardar resposta
+        this.restTemplate = new RestTemplate(factory);
+    }
+
     public String resumirTexto(String textoOriginal, String modelo, String linguagem) {
         String url = "https://api-inference.huggingface.co/models/" + modelo;
 
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(huggingfaceToken);
         headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.setAccept(List.of(MediaType.APPLICATION_JSON)); // Corrigido para aceitar json
+        headers.setAccept(List.of(MediaType.APPLICATION_JSON));
 
-        // Montar JSON com inputs e parâmetros extras (exemplo: linguagem, se precisar)
+        // Montar JSON da requisição com escape para aspas no texto
         String requestBody = "{\"inputs\": \"" + textoOriginal.replace("\"", "\\\"") + "\"";
 
-        // Exemplo de adicionar linguagem (depende do modelo e API se aceita)
         if (linguagem != null && !linguagem.isEmpty()) {
             requestBody += ", \"parameters\": { \"language\": \"" + linguagem + "\"}";
         }
@@ -35,21 +46,37 @@ public class HuggingFaceClient {
 
         HttpEntity<String> entity = new HttpEntity<>(requestBody, headers);
 
-        ResponseEntity<String> response = restTemplate.exchange(
-                url,
-                HttpMethod.POST,
-                entity,
-                String.class
-        );
+        try {
+            ResponseEntity<String> response = restTemplate.exchange(
+                    url,
+                    HttpMethod.POST,
+                    entity,
+                    String.class
+            );
 
-        if (response.getStatusCode() == HttpStatus.OK && response.getBody() != null) {
-            String body = response.getBody();
-            // Extrair summary_text do JSON de resposta (ajustar conforme o formato real)
-            int start = body.indexOf("summary_text") + 15;
-            int end = body.indexOf("\"", start);
-            return body.substring(start, end);
+            if (response.getStatusCode() == HttpStatus.OK && response.getBody() != null) {
+                ObjectMapper mapper = new ObjectMapper();
+                JsonNode root = mapper.readTree(response.getBody());
+
+                // A resposta normalmente é um array com objetos que contêm "summary_text"
+                if (root.isArray() && root.size() > 0) {
+                    JsonNode first = root.get(0);
+                    if (first.has("summary_text")) {
+                        return first.get("summary_text").asText();
+                    }
+                }
+
+                return "Resumo não encontrado na resposta da API.";
+            } else {
+                return "Erro: resposta não OK do Hugging Face - código " + response.getStatusCodeValue();
+            }
+
+        } catch (HttpServerErrorException.GatewayTimeout e) {
+            return "Tempo de espera esgotado ao processar o resumo (504 Gateway Timeout). Tente novamente mais tarde.";
+        } catch (ResourceAccessException e) {
+            return "Erro de rede ao tentar acessar Hugging Face. Verifique sua conexão.";
+        } catch (Exception e) {
+            return "Erro inesperado ao gerar resumo: " + e.getMessage();
         }
-
-        return "Erro ao gerar resumo com Hugging Face.";
     }
 }
